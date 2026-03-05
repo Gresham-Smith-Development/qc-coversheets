@@ -264,6 +264,7 @@ CREATE TABLE qc_coversheet.qc_coversheet_coversheet (
     project_wbs text NOT NULL,
     submittal_name text NOT NULL,
     submittal_date date,
+    constructability_start_date date,
     project_name_snapshot text,
     client_name_snapshot text,
     client_id_snapshot text,

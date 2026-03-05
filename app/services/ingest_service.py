@@ -145,15 +145,16 @@ SET project_execution_record_id = $2,
     project_wbs = $6,
     submittal_name = $7,
     submittal_date = $8,
-    project_name_snapshot = $9,
-    client_id_snapshot = $10,
-    client_name_snapshot = $11,
-    market_snapshot = $12,
-    location_snapshot = $13,
-    pm_name_snapshot = $14,
-    pm_email_snapshot = $15,
-    pp_name_snapshot = $16,
-    pp_email_snapshot = $17,
+    constructability_start_date = $9,
+    project_name_snapshot = $10,
+    client_id_snapshot = $11,
+    client_name_snapshot = $12,
+    market_snapshot = $13,
+    location_snapshot = $14,
+    pm_name_snapshot = $15,
+    pm_email_snapshot = $16,
+    pp_name_snapshot = $17,
+    pp_email_snapshot = $18,
     updated_at = now()
 WHERE id = $1;
 """
@@ -161,7 +162,7 @@ WHERE id = $1;
 INSERT_COVERSHEET_SQL = """
 INSERT INTO qc_coversheet.qc_coversheet_coversheet (
     project_execution_record_id, project_id, qc_coversheet_udic_id, ingested_at, source_created_at,
-    project_wbs, submittal_name, submittal_date, project_name_snapshot, client_id_snapshot, client_name_snapshot,
+    project_wbs, submittal_name, submittal_date, constructability_start_date, project_name_snapshot, client_id_snapshot, client_name_snapshot,
     market_snapshot, location_snapshot, pm_name_snapshot, pm_email_snapshot, pp_name_snapshot,
     pp_email_snapshot, updated_at
 )
@@ -169,7 +170,7 @@ VALUES (
     $1, $2, $3, $4, $5,
     $6, $7, $8, $9, $10,
     $11, $12, $13, $14, $15,
-    $16, $17, now()
+    $16, $17, $18, now()
 )
 RETURNING id;
 """
@@ -443,6 +444,9 @@ class IngestService:
         )
         submittal_name = self._pick(payload, "submittal_name", "submittalName")
         submittal_date_raw = self._pick(payload, "submittal_date", "submittalDate")
+        constructability_start_date_raw = self._pick(
+            payload, "constructability_start_date", "constructabilityStartDate"
+        )
         client_id = self._pick(payload, "client_id", "clientNameID")
         client_name = self._pick(payload, "client_name", "clientName")
 
@@ -450,6 +454,9 @@ class IngestService:
             source_created_at_raw, "recordCreatedDate"
         )
         submittal_date = self._to_date_or_none(submittal_date_raw, "submittalDate")
+        constructability_start_date = self._to_date_or_none(
+            constructability_start_date_raw, "constructabilityStartDate"
+        )
 
         existing_id = await conn.fetchval(SELECT_COVERSHEET_BY_QC_UDIC_SQL, qc_udic_id)
 
@@ -462,6 +469,7 @@ class IngestService:
             str(project_wbs),
             submittal_name,
             submittal_date,
+            constructability_start_date,
             project_name,
             client_id,
             client_name,
@@ -487,6 +495,7 @@ class IngestService:
             str(project_wbs),
             submittal_name,
             submittal_date,
+            constructability_start_date,
             project_name,
             client_id,
             client_name,

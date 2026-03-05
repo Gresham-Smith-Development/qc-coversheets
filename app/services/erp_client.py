@@ -267,7 +267,7 @@ class ErpClient:
         return {
             "pep_udic_id": pep_udic_id,
             "record_created_date": selected.get("recordCreatedDate") or now_datetime,
-            # "constructability_start_date": selected.get("constructabilityStartDate"),
+            "constructability_start_date": selected.get("constructabilityStartDate"),
             "project_wbs": selected.get("projectWbs"),
             "submittal_name": selected.get("submittalName"),
             "submittal_date": selected.get("submittalDate"),
