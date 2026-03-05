@@ -1,5 +1,9 @@
 # Admin files
-.admin
+.admin/**
+!.admin/
+!.admin/fyi/
+!.admin/fyi/**
+
 .sql_admin
 apps_process
 postgresql/migrations/queries/db_exports/*.csv
