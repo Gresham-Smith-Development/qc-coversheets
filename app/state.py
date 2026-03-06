@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from app.auth.oidc import EntraOidcClient
+from app.auth.repository import AuthRepository
 from app.security.hmac_verifier import HmacVerifier
 from app.services.concurrency import ConcurrencyLimiter
 from app.services.erp_client import ErpClient
@@ -62,3 +64,21 @@ def get_review_form_service() -> ReviewFormService:
 @lru_cache(maxsize=1)
 def get_review_admin_service() -> ReviewAdminService:
     return ReviewAdminService()
+
+
+@lru_cache(maxsize=1)
+def get_auth_repository() -> AuthRepository:
+    return AuthRepository()
+
+
+@lru_cache(maxsize=1)
+def get_entra_oidc_client() -> EntraOidcClient:
+    settings = get_settings()
+    return EntraOidcClient(
+        authority=settings.auth_entra_authority,
+        tenant_id=settings.auth_entra_tenant_id,
+        client_id=settings.auth_entra_client_id,
+        client_secret=settings.auth_entra_client_secret,
+        redirect_uri=settings.selected_redirect_uri(),
+        scope=settings.auth_scope,
+    )

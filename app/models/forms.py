@@ -128,7 +128,7 @@ class ReviewFormContext(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     review_request_id: UUID
-    status: str
+    status: str = "draft"
     form_template_id: UUID
     form_version: int
     template_key: str

@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from app.auth.dependencies import require_admin_templates_read, require_admin_templates_write
 from app.db import get_pool
 from app.models.forms import (
     ImportTemplateRequest,
@@ -18,12 +19,7 @@ from app.state import get_form_template_service
 router = APIRouter(prefix="/admin/form-templates", tags=["form-templates"])
 
 
-def _admin_guard() -> None:
-    # TODO: wire to real auth/authorization in phase 3.
-    return None
-
-
-@router.get("", response_model=list[TemplateListItem], dependencies=[Depends(_admin_guard)])
+@router.get("", response_model=list[TemplateListItem], dependencies=[Depends(require_admin_templates_read)])
 async def list_form_templates(
     pool=Depends(get_pool),
     service: FormTemplateService = Depends(get_form_template_service),
@@ -35,7 +31,7 @@ async def list_form_templates(
 @router.get(
     "/{template_key}/versions",
     response_model=list[TemplateVersionListItem],
-    dependencies=[Depends(_admin_guard)],
+    dependencies=[Depends(require_admin_templates_read)],
 )
 async def list_template_versions(
     template_key: str,
@@ -49,7 +45,7 @@ async def list_template_versions(
 @router.get(
     "/{template_key}/versions/{version}",
     response_model=TemplateVersionResponse,
-    dependencies=[Depends(_admin_guard)],
+    dependencies=[Depends(require_admin_templates_read)],
 )
 async def get_template_version(
     template_key: str,
@@ -64,7 +60,7 @@ async def get_template_version(
 @router.post(
     "/{template_key}/versions",
     response_model=TemplateVersionResponse,
-    dependencies=[Depends(_admin_guard)],
+    dependencies=[Depends(require_admin_templates_write)],
 )
 async def create_template_version(
     template_key: str,
@@ -81,7 +77,7 @@ async def create_template_version(
         )
 
 
-@router.post("/import", response_model=TemplateVersionResponse, dependencies=[Depends(_admin_guard)])
+@router.post("/import", response_model=TemplateVersionResponse, dependencies=[Depends(require_admin_templates_write)])
 async def import_template(
     payload: ImportTemplateRequest,
     pool=Depends(get_pool),
@@ -99,7 +95,7 @@ async def import_template(
 @router.get(
     "/{template_key}/versions/{version}/export",
     response_model=dict[str, Any],
-    dependencies=[Depends(_admin_guard)],
+    dependencies=[Depends(require_admin_templates_read)],
 )
 async def export_template(
     template_key: str,

@@ -7,6 +7,8 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require_review_form_submit_access, require_review_form_view_access
+from app.auth.models import AuthenticatedUser
 from app.db import get_pool
 from app.models.forms import (
     ReviewFormContext,
@@ -25,16 +27,13 @@ INSERT_REVIEW_FORM_VALIDATION_EVENT_SQL = """
 INSERT INTO qc_coversheet.review_form_validation_event (review_request_id, errors)
 VALUES ($1, $2::jsonb);
 """
-
-
-def _reviewer_guard() -> None:
-    # TODO: wire to real auth/authorization in phase 3.
-    return None
-
-
-@router.get("/review-forms/{review_request_id}", response_model=ReviewFormContext, dependencies=[Depends(_reviewer_guard)])
+@router.get(
+    "/review-forms/{review_request_id}",
+    response_model=ReviewFormContext,
+)
 async def get_review_form(
     review_request_id: UUID,
+    _user: AuthenticatedUser = Depends(require_review_form_view_access),
     pool=Depends(get_pool),
     service: ReviewFormService = Depends(get_review_form_service),
 ) -> ReviewFormContext:
@@ -45,11 +44,11 @@ async def get_review_form(
 @router.post(
     "/review-forms/{review_request_id}/validate",
     response_model=ReviewFormValidationResult,
-    dependencies=[Depends(_reviewer_guard)],
 )
 async def validate_review_form(
     review_request_id: UUID,
     payload: ReviewFormValidationRequest,
+    _user: AuthenticatedUser = Depends(require_review_form_submit_access),
     pool=Depends(get_pool),
     service: ReviewFormService = Depends(get_review_form_service),
 ) -> ReviewFormValidationResult:
@@ -79,11 +78,11 @@ async def validate_review_form(
 @router.post(
     "/review-forms/{review_request_id}/submit",
     response_model=ReviewFormSubmissionResponse,
-    dependencies=[Depends(_reviewer_guard)],
 )
 async def submit_review_form(
     review_request_id: UUID,
     payload: ReviewFormSubmissionRequest,
+    _user: AuthenticatedUser = Depends(require_review_form_submit_access),
     pool=Depends(get_pool),
     service: ReviewFormService = Depends(get_review_form_service),
 ) -> ReviewFormSubmissionResponse:
