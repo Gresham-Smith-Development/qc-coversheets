@@ -6,6 +6,7 @@
 
 .sql_admin
 apps_process
+postgresql/.archive
 postgresql/migrations/queries/db_exports/*.csv
 
 # Environment files
