@@ -7,13 +7,15 @@ SELECT *
 -- FROM qc_coversheet.project_execution_record
 -- FROM qc_coversheet.qc_coversheet_coversheet
 
-
--- WITHOUT DATA
+-- FORM DATA
 -- FROM qc_coversheet.form_template
 -- FROM qc_coversheet.form_template_version
--- FROM qc_coversheet.ingest_job
 -- FROM qc_coversheet.review_request
 -- FROM qc_coversheet.review_request_discipline
 -- FROM qc_coversheet.review_request_event
+-- FROM qc_coversheet.review_form_validation_event
+
+-- WITHOUT DATA
+-- FROM qc_coversheet.ingest_job
 -- FROM qc_coversheet.review_submission
 

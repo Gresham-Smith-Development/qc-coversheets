@@ -128,6 +128,7 @@ class ReviewFormContext(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     review_request_id: UUID
+    status: str
     form_template_id: UUID
     form_version: int
     template_key: str
@@ -145,10 +146,23 @@ class SectionAnswer(BaseModel):
     notes: str | None = ""
 
 
+class SectionAnswerDraft(BaseModel):
+    status: Literal["complete", "na"] | None = None
+    signature_name: str | None = None
+    signed_at: datetime | None = None
+    notes: str | None = None
+
+
 class DisciplineAnswer(BaseModel):
     discipline_id: UUID
     discipline_name: str
     sections: dict[str, SectionAnswer]
+
+
+class DisciplineAnswerDraft(BaseModel):
+    discipline_id: UUID
+    discipline_name: str
+    sections: dict[str, SectionAnswerDraft]
 
 
 class ReviewFormSubmissionRequest(BaseModel):
@@ -159,6 +173,24 @@ class ReviewFormSubmissionRequest(BaseModel):
     @field_validator("discipline_responses")
     @classmethod
     def validate_discipline_responses(cls, value: list[DisciplineAnswer]) -> list[DisciplineAnswer]:
+        if not value:
+            raise ValueError("discipline_responses must include at least one discipline")
+        seen = set()
+        for item in value:
+            if item.discipline_id in seen:
+                raise ValueError("discipline_responses contains duplicate discipline_id values")
+            seen.add(item.discipline_id)
+        return value
+
+
+class ReviewFormValidationRequest(BaseModel):
+    review_request_id: UUID | None = None
+    reviewer_name_expected: str | None = None
+    discipline_responses: list[DisciplineAnswerDraft]
+
+    @field_validator("discipline_responses")
+    @classmethod
+    def validate_discipline_responses(cls, value: list[DisciplineAnswerDraft]) -> list[DisciplineAnswerDraft]:
         if not value:
             raise ValueError("discipline_responses must include at least one discipline")
         seen = set()

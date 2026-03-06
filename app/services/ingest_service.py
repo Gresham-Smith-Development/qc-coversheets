@@ -15,6 +15,15 @@ from app.services.erp_client import ErpClient
 
 logger = logging.getLogger("app.ingest")
 
+ACTIVE_REVIEW_REQUEST_STATUSES = [
+    "draft",
+    "queued",
+    "sent",
+    "opened",
+    "in_progress",
+    "overdue",
+]
+
 
 UPSERT_INGEST_EVENT_SQL = """
 INSERT INTO qc_coversheet.ingest_event (
@@ -184,6 +193,70 @@ FROM qc_coversheet.review_request rr
 JOIN qc_coversheet.qc_coversheet_coversheet c ON c.id = rr.qc_coversheet_coversheet_id
 WHERE c.id = $1
 LIMIT 1;
+"""
+
+GET_ACTIVE_TEMPLATE_VERSION_SQL = """
+SELECT
+    ft.id AS form_template_id,
+    ftv.version
+FROM qc_coversheet.form_template ft
+JOIN qc_coversheet.form_template_version ftv
+    ON ftv.form_template_id = ft.id
+WHERE ft.template_key = $1
+  AND ftv.is_active = true
+ORDER BY ftv.created_at DESC, ftv.version DESC
+LIMIT 1;
+"""
+
+SELECT_DISCIPLINE_IDS_BY_CODE_SQL = """
+SELECT erp_discipline_code, id
+FROM qc_coversheet.discipline
+WHERE erp_discipline_code = ANY($1::text[]);
+"""
+
+UPSERT_REVIEW_REQUEST_SQL = """
+INSERT INTO qc_coversheet.review_request (
+    qc_coversheet_coversheet_id,
+    reviewer_contact_id,
+    reviewer_name_used,
+    expected_form_template_id,
+    expected_form_version,
+    created_at,
+    updated_at
+)
+VALUES ($1, $2, $3, $4, $5, now(), now())
+ON CONFLICT (qc_coversheet_coversheet_id, reviewer_contact_id) DO UPDATE
+SET expected_form_template_id = EXCLUDED.expected_form_template_id,
+    expected_form_version = EXCLUDED.expected_form_version,
+    reviewer_name_used = EXCLUDED.reviewer_name_used,
+    updated_at = now()
+RETURNING id, (xmax = 0) AS inserted;
+"""
+
+INSERT_REVIEW_REQUEST_DISCIPLINE_SQL = """
+INSERT INTO qc_coversheet.review_request_discipline (
+    review_request_id, discipline_id, created_at
+)
+VALUES ($1, $2, now())
+ON CONFLICT (review_request_id, discipline_id) DO NOTHING
+RETURNING 1;
+"""
+
+DELETE_REVIEW_REQUEST_DISCIPLINE_SQL = """
+DELETE FROM qc_coversheet.review_request_discipline
+WHERE review_request_id = $1
+  AND discipline_id <> ALL($2::uuid[])
+RETURNING discipline_id;
+"""
+
+CANCEL_REMOVED_REVIEWERS_SQL = """
+UPDATE qc_coversheet.review_request
+SET status = 'cancelled',
+    updated_at = now()
+WHERE qc_coversheet_coversheet_id = $1
+  AND status = ANY($2::text[])
+  AND reviewer_contact_id <> ALL($3::uuid[])
+RETURNING id;
 """
 
 
@@ -407,6 +480,7 @@ class IngestService:
             )
 
         reviewer_data = payload.get("reviewer_data", [])
+        reviewer_groups: dict[str, dict[str, Any]] = {}
         if isinstance(reviewer_data, list):
             for reviewer in reviewer_data:
                 if not isinstance(reviewer, dict):
@@ -417,21 +491,54 @@ class IngestService:
                 reviewer_company_id = reviewer.get("reviewerCompanyID")
                 reviewer_company_name = reviewer.get("reviewerCompany")
 
-                if reviewer_id:
-                    reviewer_contact_id = str(reviewer_id).strip()
-                elif reviewer_email:
-                    reviewer_contact_id = f"EMAIL:{reviewer_email}"
-                else:
+                if not reviewer_email:
+                    logger.error(
+                        "reviewer_missing_email qcUdicID=%s reviewerID=%s reviewerName=%s",
+                        qc_udic_id,
+                        reviewer_id,
+                        reviewer_name,
+                    )
                     continue
 
-                await conn.fetchval(
-                    UPSERT_CONTACT_SQL,
-                    reviewer_contact_id,
-                    reviewer_email,
-                    reviewer_name,
-                    reviewer_company_id,
-                    reviewer_company_name,
+                if reviewer_id:
+                    reviewer_contact_key = str(reviewer_id).strip()
+                else:
+                    reviewer_contact_key = f"EMAIL:{reviewer_email}"
+
+                group = reviewer_groups.setdefault(
+                    reviewer_contact_key,
+                    {
+                        "reviewer_name": None,
+                        "reviewer_email": reviewer_email,
+                        "reviewer_company_id": None,
+                        "reviewer_company_name": None,
+                        "discipline_codes": set(),
+                    },
                 )
+                if reviewer_name and not group["reviewer_name"]:
+                    group["reviewer_name"] = reviewer_name
+                if reviewer_company_id and not group["reviewer_company_id"]:
+                    group["reviewer_company_id"] = reviewer_company_id
+                if reviewer_company_name and not group["reviewer_company_name"]:
+                    group["reviewer_company_name"] = reviewer_company_name
+
+                discipline_code = reviewer.get("disciplineID")
+                if discipline_code:
+                    code_text = str(discipline_code).strip().upper()
+                    if code_text:
+                        group["discipline_codes"].add(code_text)
+
+        reviewer_contact_ids: dict[str, Any] = {}
+        for reviewer_contact_key, group in reviewer_groups.items():
+            contact_id = await conn.fetchval(
+                UPSERT_CONTACT_SQL,
+                reviewer_contact_key,
+                group["reviewer_email"],
+                group["reviewer_name"],
+                group["reviewer_company_id"],
+                group["reviewer_company_name"],
+            )
+            reviewer_contact_ids[reviewer_contact_key] = contact_id
 
         for item in self._extract_disciplines(payload):
             code = item.get("code")
@@ -483,29 +590,135 @@ class IngestService:
 
         if existing_id:
             await conn.execute(UPDATE_COVERSHEET_SQL, *args)
-            return existing_id
+            coversheet_id = existing_id
+        else:
+            coversheet_id = await conn.fetchval(
+                INSERT_COVERSHEET_SQL,
+                per_id,
+                project_id,
+                qc_udic_id,
+                now,
+                source_created_at,
+                str(project_wbs),
+                submittal_name,
+                submittal_date,
+                constructability_start_date,
+                project_name,
+                client_id,
+                client_name,
+                market,
+                location,
+                pm_name,
+                pm_email,
+                pp_name,
+                pp_email,
+            )
 
-        return await conn.fetchval(
-            INSERT_COVERSHEET_SQL,
-            per_id,
-            project_id,
-            qc_udic_id,
-            now,
-            source_created_at,
-            str(project_wbs),
-            submittal_name,
-            submittal_date,
-            constructability_start_date,
-            project_name,
-            client_id,
-            client_name,
-            market,
-            location,
-            pm_name,
-            pm_email,
-            pp_name,
-            pp_email,
+        template_row = None
+        discipline_ids_by_code: dict[str, Any] = {}
+        created_requests = 0
+        updated_requests = 0
+        disciplines_added = 0
+        disciplines_removed = 0
+
+        if reviewer_groups:
+            template_row = await conn.fetchrow(
+                GET_ACTIVE_TEMPLATE_VERSION_SQL, "qc_subconsultant_review"
+            )
+            if template_row is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Active template version not found for qc_subconsultant_review",
+                )
+
+            discipline_codes: list[str] = sorted(
+                {
+                    code
+                    for group in reviewer_groups.values()
+                    for code in group["discipline_codes"]
+                }
+            )
+            if discipline_codes:
+                rows = await conn.fetch(
+                    SELECT_DISCIPLINE_IDS_BY_CODE_SQL, discipline_codes
+                )
+                discipline_ids_by_code = {
+                    row["erp_discipline_code"]: row["id"] for row in rows
+                }
+
+            for reviewer_contact_key, group in reviewer_groups.items():
+                contact_id = reviewer_contact_ids[reviewer_contact_key]
+                request_row = await conn.fetchrow(
+                    UPSERT_REVIEW_REQUEST_SQL,
+                    coversheet_id,
+                    contact_id,
+                    group["reviewer_name"],
+                    template_row["form_template_id"],
+                    template_row["version"],
+                )
+                if request_row and request_row["inserted"]:
+                    created_requests += 1
+                else:
+                    updated_requests += 1
+
+                review_request_id = request_row["id"]
+                missing_codes = [
+                    code
+                    for code in group["discipline_codes"]
+                    if code not in discipline_ids_by_code
+                ]
+                for code in missing_codes:
+                    logger.warning(
+                        "reviewer_missing_discipline_code qcUdicID=%s reviewerKey=%s disciplineCode=%s",
+                        qc_udic_id,
+                        reviewer_contact_key,
+                        code,
+                    )
+
+                desired_discipline_ids = [
+                    discipline_ids_by_code[code]
+                    for code in sorted(group["discipline_codes"])
+                    if code in discipline_ids_by_code
+                ]
+                for discipline_id in desired_discipline_ids:
+                    inserted = await conn.fetchval(
+                        INSERT_REVIEW_REQUEST_DISCIPLINE_SQL,
+                        review_request_id,
+                        discipline_id,
+                    )
+                    if inserted:
+                        disciplines_added += 1
+
+                removed_rows = await conn.fetch(
+                    DELETE_REVIEW_REQUEST_DISCIPLINE_SQL,
+                    review_request_id,
+                    desired_discipline_ids,
+                )
+                disciplines_removed += len(removed_rows)
+
+        reviewer_contact_id_list = list(reviewer_contact_ids.values())
+        cancelled_rows = await conn.fetch(
+            CANCEL_REMOVED_REVIEWERS_SQL,
+            coversheet_id,
+            ACTIVE_REVIEW_REQUEST_STATUSES,
+            reviewer_contact_id_list,
         )
+        requests_cancelled = len(cancelled_rows)
+
+        logger.info(
+            "review_request_sync qcUdicID=%s coversheet_id=%s reviewers=%s requests_created=%s "
+            "requests_updated=%s disciplines_added=%s disciplines_removed=%s requests_cancelled=%s",
+            qc_udic_id,
+            coversheet_id,
+            len(reviewer_groups),
+            created_requests,
+            updated_requests,
+            disciplines_added,
+            disciplines_removed,
+            requests_cancelled,
+        )
+
+        return coversheet_id
 
     @staticmethod
     def _pick(data: dict, *keys: str) -> Any:

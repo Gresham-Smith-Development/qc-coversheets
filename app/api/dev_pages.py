@@ -233,6 +233,11 @@ async def review_form_page() -> str:
     textarea { width: 100%; min-height: 80px; }
     .muted { color: #666; font-size: 0.9rem; }
     pre { background: #f8f8f8; padding: 12px; white-space: pre-wrap; }
+    .error-banner { border: 1px solid #b42318; background: #fef3f2; color: #7a271a; padding: 10px 12px; border-radius: 6px; margin: 12px 0; display: none; }
+    .error-banner h3 { margin: 0 0 6px 0; font-size: 1rem; }
+    .error-banner ul { margin: 0; padding-left: 18px; }
+    .error-section { border-color: #b42318; box-shadow: 0 0 0 1px #b42318 inset; }
+    .info-banner { border: 1px solid #0f766e; background: #ecfdf5; color: #115e59; padding: 10px 12px; border-radius: 6px; margin: 12px 0; display: none; }
   </style>
 </head>
 <body>
@@ -241,6 +246,8 @@ async def review_form_page() -> str:
   <button onclick="loadForm()">Load Form</button>
   <button onclick="validateForm()">Validate</button>
   <button onclick="submitForm()">Submit</button>
+  <div id="validationBanner" class="error-banner"></div>
+  <div id="infoBanner" class="info-banner"></div>
   <div id="brandHeader" class="card"></div>
   <div id="autoFields" class="card"></div>
   <div id="disciplineBlocks"></div>
@@ -248,18 +255,64 @@ async def review_form_page() -> str:
   <pre id="result"></pre>
   <script>
     let context = null;
+    let sectionLabelToKey = new Map();
     function show(value) {
       document.getElementById("result").textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
     }
+    function clearValidationUi() {
+      document.getElementById("validationBanner").style.display = "none";
+      document.getElementById("validationBanner").innerHTML = "";
+      document.getElementById("infoBanner").style.display = "none";
+      document.getElementById("infoBanner").innerHTML = "";
+      document.querySelectorAll(".error-section").forEach(el => el.classList.remove("error-section"));
+    }
+    function showInfo(message) {
+      const banner = document.getElementById("infoBanner");
+      banner.textContent = message;
+      banner.style.display = "block";
+    }
+    function setFormDisabled(disabled) {
+      const selector = "input, textarea, button";
+      document.querySelectorAll(selector).forEach(el => {
+        if (el.id === "reviewRequestId") return;
+        if (el.getAttribute("onclick") === "loadForm()") return;
+        el.disabled = disabled;
+      });
+    }
+    function renderValidationErrors(errors) {
+      if (!Array.isArray(errors) || errors.length === 0) return;
+      const banner = document.getElementById("validationBanner");
+      const items = errors.map(err => `<li>${err}</li>`).join("");
+      banner.innerHTML = `<h3>Validation failed</h3><ul>${items}</ul>`;
+      banner.style.display = "block";
+
+      const pattern = /Section '([^']+)' for discipline '([^']+)'/;
+      errors.forEach(err => {
+        const match = err.match(pattern);
+        if (!match) return;
+        const sectionLabel = match[1];
+        const disciplineName = match[2];
+        const sectionKey = sectionLabelToKey.get(sectionLabel) || sectionLabel;
+        const card = [...document.querySelectorAll("[data-discipline-id]")]
+          .find(item => item.getAttribute("data-discipline-name") === disciplineName);
+        if (!card) return;
+        const section = card.querySelector(`[data-section="${sectionKey}"]`);
+        if (section) section.classList.add("error-section");
+      });
+    }
     async function loadForm() {
+      clearValidationUi();
       const id = document.getElementById("reviewRequestId").value.trim();
       const response = await fetch(`/review-forms/${id}`);
       const body = await response.json();
       if (!response.ok) return show(body);
       context = body;
+      sectionLabelToKey = new Map(
+        (body.schema_json?.discipline_repeat?.items || []).map(item => [item.section_label, item.section_key])
+      );
       const brand = body.schema_json.branding || {};
       const brandDiv = document.getElementById("brandHeader");
-      const logoHtml = brand.logo_url ? `<img src="${brand.logo_url}" alt="logo" style="max-height:60px;max-width:280px;display:block;margin-bottom:8px;" />` : "";
+      const logoHtml = brand.logo_url ? `<img src="${brand.logo_url}" alt="logo" style="display:block;margin-bottom:8px;" />` : "";
       brandDiv.innerHTML = `${logoHtml}<div><strong>${brand.org_name || ""}</strong></div>`;
       const autoDiv = document.getElementById("autoFields");
       autoDiv.innerHTML = "<h3>Auto Fields</h3>" + Object.entries(body.auto_values).map(([k,v]) => `<div><strong>${k}</strong>: ${v ?? ""}</div>`).join("");
@@ -281,6 +334,11 @@ async def review_form_page() -> str:
         </div>
       `).join("");
       document.getElementById("disciplineBlocks").innerHTML = blocks;
+      setFormDisabled(false);
+      if (body.status === "submitted") {
+        showInfo("This review request has already been submitted and is locked.");
+        setFormDisabled(true);
+      }
       show(body);
     }
     function stamp(button) {
@@ -298,10 +356,14 @@ async def review_form_page() -> str:
           [...card.querySelectorAll("[data-section]")].forEach(section => {
             const sectionKey = section.getAttribute("data-section");
             const checked = section.querySelector("input[type='radio']:checked");
+            const signatureRaw = section.querySelector("[data-field='signature_name']").value;
+            const signedAtRaw = section.querySelector("[data-field='signed_at']").value;
+            const signatureName = signatureRaw.trim() ? signatureRaw : null;
+            const signedAt = signedAtRaw.trim() ? signedAtRaw : null;
             sections[sectionKey] = {
               status: checked ? checked.value : null,
-              signature_name: section.querySelector("[data-field='signature_name']").value,
-              signed_at: section.querySelector("[data-field='signed_at']").value,
+              signature_name: signatureName,
+              signed_at: signedAt,
               notes: section.querySelector("[data-field='notes']").value
             };
           });
@@ -314,22 +376,46 @@ async def review_form_page() -> str:
       };
     }
     async function validateForm() {
+      clearValidationUi();
+      if (context && context.status === "submitted") {
+        showInfo("This review request has already been submitted and cannot be validated.");
+        return;
+      }
       const id = document.getElementById("reviewRequestId").value.trim();
       const response = await fetch(`/review-forms/${id}/validate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(collectPayload())
       });
-      show(await response.json());
+      const body = await response.json();
+      if (!response.ok) {
+        show(body);
+        return;
+      }
+      show(body);
+      if (body && body.valid === false) {
+        renderValidationErrors(body.errors);
+      }
     }
     async function submitForm() {
+      clearValidationUi();
+      if (context && context.status === "submitted") {
+        showInfo("This review request has already been submitted and cannot be updated.");
+        return;
+      }
       const id = document.getElementById("reviewRequestId").value.trim();
       const response = await fetch(`/review-forms/${id}/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(collectPayload())
       });
-      show(await response.json());
+      const body = await response.json();
+      show(body);
+      if (!response.ok && body && Array.isArray(body.detail)) {
+        renderValidationErrors(body.detail);
+      } else if (!response.ok && response.status === 409) {
+        showInfo(body?.detail || "This review request has already been submitted.");
+      }
     }
   </script>
 </body>

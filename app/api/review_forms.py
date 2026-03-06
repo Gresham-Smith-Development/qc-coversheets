@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import json
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.db import get_pool
@@ -9,12 +12,19 @@ from app.models.forms import (
     ReviewFormContext,
     ReviewFormSubmissionRequest,
     ReviewFormSubmissionResponse,
+    ReviewFormValidationRequest,
     ReviewFormValidationResult,
 )
 from app.services.review_form_service import ReviewFormService
 from app.state import get_review_form_service
 
 router = APIRouter(tags=["review-forms"])
+logger = logging.getLogger(__name__)
+
+INSERT_REVIEW_FORM_VALIDATION_EVENT_SQL = """
+INSERT INTO qc_coversheet.review_form_validation_event (review_request_id, errors)
+VALUES ($1, $2::jsonb);
+"""
 
 
 def _reviewer_guard() -> None:
@@ -39,7 +49,7 @@ async def get_review_form(
 )
 async def validate_review_form(
     review_request_id: UUID,
-    payload: ReviewFormSubmissionRequest,
+    payload: ReviewFormValidationRequest,
     pool=Depends(get_pool),
     service: ReviewFormService = Depends(get_review_form_service),
 ) -> ReviewFormValidationResult:
@@ -50,7 +60,20 @@ async def validate_review_form(
             status_code=400,
             detail="Payload review_request_id does not match URL review_request_id",
         )
-    return service.validate_submission_payload(context=context, submission=payload)
+    result = service.validate_submission_payload(context=context, submission=payload)
+    if not result.valid:
+        logger.warning(
+            "Review form validation failed: review_request_id=%s errors=%s",
+            review_request_id,
+            result.errors,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                INSERT_REVIEW_FORM_VALIDATION_EVENT_SQL,
+                review_request_id,
+                json.dumps(result.errors),
+            )
+    return result
 
 
 @router.post(
@@ -66,6 +89,8 @@ async def submit_review_form(
 ) -> ReviewFormSubmissionResponse:
     async with pool.acquire() as conn:
         context = await service.resolve_review_form(conn, review_request_id)
+        if context.status == "submitted":
+            raise HTTPException(status_code=409, detail="Review request has already been submitted")
         if payload.review_request_id and payload.review_request_id != review_request_id:
             raise HTTPException(
                 status_code=400,
@@ -75,4 +100,3 @@ async def submit_review_form(
         if not validation.valid:
             raise HTTPException(status_code=422, detail=validation.errors)
         return await service.submit_review_form(conn, context=context, submission=payload)
-

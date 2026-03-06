@@ -13,6 +13,7 @@ from app.models.forms import (
     ReviewFormContext,
     ReviewFormSubmissionRequest,
     ReviewFormSubmissionResponse,
+    ReviewFormValidationRequest,
     ReviewFormValidationResult,
 )
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 GET_REVIEW_FORM_CONTEXT_SQL = """
 SELECT
     rr.id AS review_request_id,
+    rr.status,
     rr.expected_form_template_id AS form_template_id,
     rr.expected_form_version AS form_version,
     ft.template_key,
@@ -65,6 +67,14 @@ INSERT INTO qc_coversheet.review_submission (
 )
 VALUES ($1, $2, $3, now(), $4::jsonb, NULL, NULL, now())
 RETURNING id;
+"""
+
+UPDATE_REVIEW_REQUEST_SUBMITTED_SQL = """
+UPDATE qc_coversheet.review_request
+SET status = 'submitted',
+    completed_at = now(),
+    updated_at = now()
+WHERE id = $1;
 """
 
 
@@ -145,6 +155,7 @@ class ReviewFormService:
         }
         return ReviewFormContext(
             review_request_id=row["review_request_id"],
+            status=row["status"],
             form_template_id=row["form_template_id"],
             form_version=row["form_version"],
             template_key=row["template_key"],
@@ -156,7 +167,10 @@ class ReviewFormService:
         )
 
     def validate_submission_payload(
-        self, *, context: ReviewFormContext, submission: ReviewFormSubmissionRequest
+        self,
+        *,
+        context: ReviewFormContext,
+        submission: ReviewFormSubmissionRequest | ReviewFormValidationRequest,
     ) -> ReviewFormValidationResult:
         errors: list[str] = []
         expected_discipline_ids = {item.discipline_id for item in context.disciplines}
@@ -170,7 +184,16 @@ class ReviewFormService:
             if extra:
                 errors.append(f"Unexpected discipline responses: {', '.join(str(item) for item in sorted(extra))}")
 
-        expected_section_keys = {item.section_key for item in context.template_schema.discipline_repeat.items}
+        section_configs = {item.section_key: item for item in context.template_schema.discipline_repeat.items}
+        expected_section_keys = set(section_configs.keys())
+
+        def format_section_list(keys: set[str]) -> str:
+            labels = []
+            for key in sorted(keys):
+                config = section_configs.get(key)
+                labels.append(config.section_label if config else key)
+            return ", ".join(labels)
+
         for response in submission.discipline_responses:
             section_keys = set(response.sections.keys())
             if section_keys != expected_section_keys:
@@ -179,27 +202,57 @@ class ReviewFormService:
                 if missing_sections:
                     errors.append(
                         f"Discipline '{response.discipline_name}' missing sections: "
-                        f"{', '.join(sorted(missing_sections))}"
+                        f"{format_section_list(missing_sections)}"
                     )
                 if extra_sections:
                     errors.append(
                         f"Discipline '{response.discipline_name}' has unexpected sections: "
-                        f"{', '.join(sorted(extra_sections))}"
+                        f"{format_section_list(extra_sections)}"
                     )
                 continue
 
             for section_key, section_answer in response.sections.items():
-                expected_name = context.reviewer_name.strip().lower()
-                actual_name = section_answer.signature_name.strip().lower()
-                if expected_name != actual_name:
+                config = section_configs[section_key]
+                section_label = config.section_label
+                status = section_answer.status
+                if config.choice.required and not status:
                     errors.append(
-                        f"Section '{section_key}' for discipline '{response.discipline_name}' "
-                        "has a signature name that does not match reviewer name"
+                        f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                        "is missing required status"
                     )
-                if section_answer.notes and len(section_answer.notes) > 4000:
+                    continue
+
+                if status and config.signature.required_when_choice_selected:
+                    signature_name = (section_answer.signature_name or "").strip()
+                    if not signature_name:
+                        errors.append(
+                            f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                            "is missing required signature name"
+                        )
+                    elif config.signature.type_name_must_match_reviewer:
+                        expected_name = context.reviewer_name.strip().lower()
+                        actual_name = signature_name.lower()
+                        if expected_name != actual_name:
+                            errors.append(
+                                f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                                "has a signature name that does not match reviewer name"
+                            )
+                    if config.signature.capture_timestamp and not section_answer.signed_at:
+                        errors.append(
+                            f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                            "is missing required signature timestamp"
+                        )
+
+                notes = section_answer.notes or ""
+                if config.notes.required and not notes.strip():
                     errors.append(
-                        f"Section '{section_key}' for discipline '{response.discipline_name}' "
-                        "notes exceeds 4000 characters"
+                        f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                        "is missing required notes"
+                    )
+                if notes and len(notes) > config.notes.max_length:
+                    errors.append(
+                        f"Section '{section_label}' for discipline '{response.discipline_name}' "
+                        f"notes exceeds {config.notes.max_length} characters"
                     )
 
         return ReviewFormValidationResult(valid=len(errors) == 0, errors=errors)
@@ -216,13 +269,18 @@ class ReviewFormService:
             "reviewer_name_expected": context.reviewer_name,
             "discipline_responses": [item.model_dump(mode="json") for item in submission.discipline_responses],
         }
-        submission_id = await conn.fetchval(
-            INSERT_REVIEW_SUBMISSION_SQL,
-            context.review_request_id,
-            context.form_template_id,
-            context.form_version,
-            answers,
-        )
+        async with conn.transaction():
+            submission_id = await conn.fetchval(
+                INSERT_REVIEW_SUBMISSION_SQL,
+                context.review_request_id,
+                context.form_template_id,
+                context.form_version,
+                json.dumps(answers),
+            )
+            await conn.execute(
+                UPDATE_REVIEW_REQUEST_SUBMITTED_SQL,
+                context.review_request_id,
+            )
         return ReviewFormSubmissionResponse(
             status="submitted",
             submission_id=submission_id,
