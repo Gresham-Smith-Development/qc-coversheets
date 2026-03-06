@@ -41,7 +41,7 @@ async def admin_landing_page() -> str:
   </div>
   <div class="card" id="pendingCard" style="display:none;">
     <h3>Welcome</h3>
-    <div>You are signed in, but do not currently have access to this application.</div>
+    <div id="pendingGreeting">You are signed in, but do not currently have access to this application.</div>
     <div style="margin-top:6px;">Please contact an administrator to request access.</div>
     <div style="margin-top:10px;">
       <button type="button" onclick="logout()">Logout</button>
@@ -73,6 +73,12 @@ async def admin_landing_page() -> str:
     const authHint = document.getElementById("authHint");
     const authCard = document.getElementById("authCard");
     const pendingCard = document.getElementById("pendingCard");
+    const pendingGreeting = document.getElementById("pendingGreeting");
+    function firstNameFromMe(me) {
+      const raw = (me?.display_name || "").trim();
+      if (!raw) return "";
+      return raw.split(/\s+/)[0] || "";
+    }
     async function refreshAuth() {
       const response = await fetch("/me");
       const body = await response.json();
@@ -93,14 +99,20 @@ async def admin_landing_page() -> str:
       );
       if (!isAuthenticated) {
         authHint.textContent = "Sign in to access admin/reviewer tools.";
+        pendingGreeting.textContent = "You are signed in, but do not currently have access to this application.";
         authCard.style.display = "block";
         pendingCard.style.display = "none";
       } else if (!isActive) {
+        const firstName = firstNameFromMe(body);
+        pendingGreeting.textContent = firstName
+          ? `Welcome ${firstName}. You are signed in, but do not currently have access to this application.`
+          : "You are signed in, but do not currently have access to this application.";
         authHint.textContent = "";
         authCard.style.display = "none";
         pendingCard.style.display = "block";
       } else {
-        authHint.textContent = "Access is active.";
+        const firstName = firstNameFromMe(body);
+        authHint.textContent = firstName ? `Welcome ${firstName}. Access is active.` : "Access is active.";
         authCard.style.display = "block";
         pendingCard.style.display = "none";
       }
